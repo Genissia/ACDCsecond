@@ -1,15 +1,8 @@
 """GLSL sources for the Thunder Canyon renderer.
 
-Ported from ../index.html's <script id="vs"/"fs"> blocks (WebGL1 / GLSL ES
-100) to desktop GLSL 330 core for moderngl. The raymarching math (noise,
-fbm, terrain, lightning, shading) is byte-for-byte the same algorithm as the
-browser version -- only the shader-stage boilerplate changed:
-  - `attribute` / `varying` -> `in` / `out`
-  - `gl_FragColor` -> a declared `out vec4 fragColor`
-  - added an explicit `#version 330` + precision line
-
-Keep this in sync with index.html's shaders by hand if you tune the look
-in one place -- there is no build step that shares them.
+Desktop GLSL 330 core, written for moderngl. The raymarching math (noise,
+fbm, terrain, lightning, shading) all lives in the fragment shader below;
+tune the look here -- there is no separate build step.
 """
 
 VERTEX_SRC = """

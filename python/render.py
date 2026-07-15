@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Thunder Canyon -- standalone Python/OpenGL renderer.
 
-Same raymarched, cel-shaded canyon + storm shader as index.html, driven by
-real audio analysis (see audio_features.py) instead of a browser. Renders
-frame-by-frame through moderngl (real GPU if available) and muxes the
-result with the source audio via ffmpeg in one pass.
+A raymarched, cel-shaded canyon + storm shader driven by real audio analysis
+(see audio_features.py). Renders frame-by-frame through moderngl (real GPU if
+available) and muxes the result with the source audio via ffmpeg in one pass.
 
 Usage:
     python3 render.py song.mp3 -o out.mp4
@@ -31,7 +30,7 @@ from audio_features import extract_features, Features, find_ffmpeg
 
 
 def synthetic_features(fps: int, seconds: float) -> Features:
-    """Demo driving signal (no audio) -- mirrors the browser app's demo mode."""
+    """Demo driving signal (no audio) -- a synthetic beat so the scene is alive."""
     frames = int(seconds * fps)
     t = np.arange(frames) / fps
     bpm = 118.0

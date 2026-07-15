@@ -1,8 +1,8 @@
 """Audio -> per-video-frame feature extraction for the Thunder Canyon renderer.
 
-Mirrors the live browser app's signal flow (index.html's `analyze()`):
-band energies drive the mountains, a broadband onset drives the lightning.
-Being offline, this can do better than the browser's causal heuristic:
+Signal flow: band energies drive the mountains, a broadband onset drives the
+lightning. Being fully offline (it can see the whole song up front), it uses a
+non-causal approach that a live/streaming detector can't:
 
   - librosa's standard adaptive peak-picker replaces the hand-rolled local
     threshold (proper, well-tested onset/beat literature algorithm).
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - optional fallback
 
 SR = 44100  # canonical analysis sample rate
 
-# Hz ranges for the three bands (mirrors the browser AnalyserNode split)
+# Hz ranges for the three bands (low = bass/kick, mid = riffs, high = cymbals)
 LOW_HZ = (20, 320)
 MID_HZ = (320, 2000)
 HIGH_HZ = (2000, 6500)
@@ -44,7 +44,7 @@ ONSET_WEIGHTS = (0.45, 0.95, 0.35)  # low, mid, high
 ENV_ATTACK = 0.5   # per-frame envelope-follower attack (rising)
 ENV_RELEASE = 0.06  # per-frame envelope-follower release (falling)
 
-FLASH_DECAY_PER_SEC = 0.04  # matches the browser's Math.pow(0.04, dt) flash decay
+FLASH_DECAY_PER_SEC = 0.04  # flash envelope decays to 4% of its value each second
 
 
 def find_ffmpeg() -> str:

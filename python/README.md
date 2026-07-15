@@ -1,9 +1,8 @@
 # Thunder Canyon — Python offline renderer
 
-A standalone command-line version of `../index.html`: same raymarched,
-cel-shaded canyon + storm shader, same audio-reactive design, rendered to an
-`.mp4` file instead of a browser canvas. Built for machines with a real GPU
-where it renders far faster than the in-browser recorder, and for
+A standalone command-line renderer: a raymarched, cel-shaded canyon + storm
+shader with an audio-reactive design, rendered straight to an `.mp4` file.
+Built for machines with a real GPU where it renders fast, and for
 batch/headless use (servers, CI, etc.).
 
 ## Setup
@@ -42,20 +41,17 @@ audio track both work.
 
 1. **`audio_features.py`** — decodes the input via ffmpeg to a canonical
    mono WAV, computes an STFT, and derives:
-   - smoothed low/mid/high band envelopes (mirrors the browser's
-     `AnalyserNode` bands) → drive mountain size (`uLow`) and crest
-     detail/melody (`uMid`) in the shader.
+   - smoothed low/mid/high band envelopes (a three-way frequency split)
+     → drive mountain size (`uLow`) and crest detail/melody (`uMid`) in
+     the shader.
    - a broadband onset curve, peak-picked with librosa's standard
      adaptive algorithm, **then filtered to a global percentile of the
      whole song** — this is what keeps lightning to genuinely intense
-     moments instead of firing on every riff note (a live/causal detector,
-     like the browser's, can't see the whole song in advance and is
-     inherently less selective).
-2. **`shaders.py`** — the exact same GLSL raymarching shader as
-   `index.html`, ported to desktop GLSL 330 (`gl_FragColor` → `out
-   fragColor`, `attribute`/`varying` → `in`/`out`). Tune the *look* in one
-   place and port the change to the other by hand — there's no shared
-   build step.
+     moments instead of firing on every riff note (a live/causal detector
+     can't see the whole song in advance and is inherently less selective).
+2. **`shaders.py`** — the GLSL raymarching shader, written for desktop
+   GLSL 330. Tune the *look* here (palette, wall steepness, fog, canyon
+   width) — there's no separate build step.
 3. **`render.py`** — opens a headless OpenGL context (moderngl), renders
    one frame per audio-frame with the extracted features as uniforms, and
    pipes raw RGB frames straight into a single ffmpeg process that muxes
@@ -74,12 +70,9 @@ then pass `--gl-backend egl` explicitly. On a machine with a real GPU and
 drivers, no extra setup is normally needed — `--gl-backend auto` (the
 default) finds it.
 
-## Differences from the browser app
+## Notes
 
-- No live interactivity (no drag-drop, no play/pause) — it's a batch
-  renderer, by design.
-- Lightning selectivity can be smarter here: it sees the whole song up
-  front, so `--intensity` is a genuine "top N% of the entire track" gate,
-  not just a recent-history heuristic.
-- Same visual language, ported by hand — if you tune `shaders.py`, mirror
-  the change in `../index.html`'s `<script id="fs">` (or vice versa).
+- It's a batch renderer, by design — no live playback or interactivity.
+- Because it sees the whole song up front, `--intensity` is a genuine
+  "top N% of the entire track" gate, not just a recent-history heuristic —
+  so lightning selectivity is a real, global decision.
