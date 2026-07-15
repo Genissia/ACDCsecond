@@ -1,0 +1,24 @@
+# Copyrighted / user-supplied audio stays local — do not commit or distribute
+assets/*.mp3
+assets/*.mpeg
+assets/*.mpg
+assets/*.wav
+assets/*.m4a
+assets/*.aac
+assets/*.flac
+assets/*.ogg
+assets/*.opus
+assets/*.webm
+
+# rendered captures
+*.webm
+*.mp4
+renders/
+
+# os / editor cruft
+.DS_Store
+node_modules/
+__pycache__/
+*.pyc
+python/venv/
+python/.venv/
