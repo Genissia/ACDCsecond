@@ -21,8 +21,8 @@ PyCharm, or from a terminal):
 python main.py
 ```
 
-- **Give it an audio file** when prompted → it renders that track into a video.
-- **Press Enter with no file** → it renders a short no-audio demo, so you can
+- **A file picker opens** → choose an audio file and it renders that track.
+- **Hit Cancel instead** → it renders a short no-audio demo, so you can
   confirm everything is set up before pointing it at a real song.
 
 ### First-time setup

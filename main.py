@@ -2,12 +2,11 @@
 """Thunder Canyon -- easy launcher.
 
 The simplest way to render a video: just run this file (hit the green run
-button in PyCharm, or `python main.py` in a terminal) and answer the two
-prompts.
+button in PyCharm, or `python main.py` in a terminal).
 
-    * Give it an audio file  -> renders that track into a video.
-    * Leave the audio empty   -> renders a short no-audio demo instead, so
-      you can confirm everything works.
+    * A file picker opens -> choose an audio file to visualize.
+    * Cancel the picker    -> renders a short no-audio demo instead, so you
+      can confirm everything works before pointing it at a real song.
 
 Want full control (resolution, fps, lightning tuning)? Call the renderer
 directly with flags -- see python/README.md:
@@ -26,12 +25,35 @@ sys.path.insert(0, str(PYTHON_DIR))
 
 import render  # noqa: E402  (import intentionally follows the sys.path tweak)
 
+# Extensions offered in the file picker -- ffmpeg can decode far more, so
+# "All files" is always available too.
+AUDIO_EXTS = "*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus *.webm *.mp4 *.mov *.mkv"
 
-def ask(prompt: str, default: str = "") -> str:
-    """Prompt for input; strip whitespace and the quotes drag-and-drop adds."""
-    suffix = f" [{default}]" if default else ""
-    val = input(f"{prompt}{suffix}: ").strip().strip('"').strip("'")
-    return val or default
+
+def pick_audio() -> str:
+    """Ask the user for the audio file to visualize.
+
+    Opens a graphical file picker and returns the chosen path, or "" if the
+    user cancels (which means "render the demo"). On a machine with no GUI
+    (a headless server, or a Python without tkinter) it falls back to a
+    typed prompt so the launcher still works.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()                 # we want only the dialog, not a blank window
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(
+            title="Choose an audio file  (Cancel = demo)",
+            filetypes=[("Audio / video", AUDIO_EXTS), ("All files", "*.*")],
+        )
+        root.destroy()
+        return path or ""
+    except Exception:
+        raw = input("Type or paste an audio file path (or press Enter for a demo): ")
+        return raw.strip().strip('"').strip("'")
 
 
 def main() -> None:
@@ -42,10 +64,18 @@ def main() -> None:
         return
 
     print("Thunder Canyon -- offline renderer")
-    print("Drag an audio file in for its path, or press Enter for a demo.\n")
+    print("A file picker will open: choose an audio file, or Cancel for a demo.\n")
 
-    audio = ask("Audio file to visualize")
-    output = ask("Save video as", "out.mp4")
+    audio = pick_audio()
+    if audio:
+        print(f"  audio:  {audio}")
+        default_out = Path(audio).with_suffix(".mp4").name  # song.mp3 -> song.mp4
+    else:
+        print("  no file chosen -> rendering a demo")
+        default_out = "demo.mp4"
+
+    raw = input(f"Save video as [{default_out}]: ").strip().strip('"').strip("'")
+    output = raw or default_out
     print()
 
     argv = [audio, "-o", output] if audio else ["--demo", "-o", output]
