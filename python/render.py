@@ -19,6 +19,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -121,6 +122,18 @@ def render(args: argparse.Namespace) -> None:
     print("encoding:", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    # Drain ffmpeg's stderr on a background thread. ffmpeg writes progress to
+    # stderr the whole time; if we only read it at the end, its pipe buffer
+    # fills on a long render, ffmpeg blocks writing to it, stops reading our
+    # video frames, and the whole pipeline deadlocks. Reading it continuously
+    # keeps frames flowing while still capturing the log for error reporting.
+    err_chunks: list[bytes] = []
+    err_thread = threading.Thread(
+        target=lambda: err_chunks.extend(iter(lambda: proc.stderr.read(4096), b"")),
+        daemon=True,
+    )
+    err_thread.start()
+
     t0 = time.time()
     try:
         frame_vals = {
@@ -149,10 +162,10 @@ def render(args: argparse.Namespace) -> None:
                 print(f"  frame {i}/{feat.frames}  {el:.0f}s  {r:.1f} fps", flush=True)
     finally:
         proc.stdin.close()
-        err = proc.stderr.read()
         ret = proc.wait()
+        err_thread.join()
         if ret != 0:
-            sys.stderr.write(err.decode(errors="replace"))
+            sys.stderr.write(b"".join(err_chunks).decode(errors="replace"))
             raise RuntimeError(f"ffmpeg exited {ret}")
 
     print(f"done: {out_path}  ({time.time()-t0:.0f}s)")
