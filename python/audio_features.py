@@ -47,6 +47,31 @@ ENV_RELEASE = 0.06  # per-frame envelope-follower release (falling)
 FLASH_DECAY_PER_SEC = 0.04  # flash envelope decays to 4% of its value each second
 
 
+def parse_time(token: str) -> float:
+    """Parse one timestamp: seconds ('42', '42.5') or 'm:ss' / 'h:mm:ss'."""
+    token = token.strip()
+    if ":" in token:
+        parts = [float(p) for p in token.split(":")]
+        sec = 0.0
+        for p in parts:
+            sec = sec * 60.0 + p
+        return sec
+    return float(token)
+
+
+def load_strikes_file(path: str) -> list[float]:
+    """Read strike timestamps, one per line. Blank lines and #comments ignored.
+
+    Each line is a time in seconds ('42', '42.5') or 'm:ss' (e.g. '0:42').
+    """
+    times: list[float] = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            times.append(parse_time(line))
+    return sorted(times)
+
+
 def find_ffmpeg() -> str:
     exe = shutil.which("ffmpeg")
     if exe:
@@ -135,6 +160,8 @@ def extract_features(
     intensity_percentile: float = 82.0,
     refractory_sec: float = 0.4,
     rng: np.random.Generator | None = None,
+    forced_strikes: list[float] | None = None,
+    strikes_only: bool = False,
 ) -> Features:
     """Analyze an audio file and produce per-video-frame driving signals.
 
@@ -142,6 +169,11 @@ def extract_features(
       the top (100 - intensity_percentile)% of the *whole song's* energy
       trigger a strike. Raise it for fewer, bigger moments; lower it for
       more frequent strikes.
+    forced_strikes: explicit strike times in seconds (e.g. every "Thunder!").
+      Each fires a full-strength bolt at that time, on top of the detected
+      strikes -- unless strikes_only is set.
+    strikes_only: ignore audio-detected strikes and fire ONLY at
+      forced_strikes (lightning strictly on the named moments).
     refractory_sec: minimum gap between strikes.
     """
     rng = rng or np.random.default_rng()
@@ -194,15 +226,26 @@ def extract_features(
         gate = np.percentile(onset, intensity_percentile)
         peaks = peaks[onset[peaks] >= gate]
 
-    strike_times = [float(p / fps) for p in peaks]
+    # per-strike STRENGTH map (frame -> 0..1). Detected peaks are scaled by how
+    # hard the onset hit (light strikes still flash at 0.55, biggest reach 1.0);
+    # forced strikes (e.g. every "Thunder!") always fire at full strength.
+    strength: dict[int, float] = {}
+    if not strikes_only and len(peaks):
+        pmax = onset[peaks].max() + 1e-9
+        for p in peaks:
+            strength[int(p)] = 0.55 + 0.45 * float(onset[p] / pmax)
+    if forced_strikes:
+        for tsec in forced_strikes:
+            fr = int(round(tsec * fps))
+            if 0 <= fr < frames:
+                strength[fr] = 1.0
 
-    # per-strike STRENGTH: scale each flash by how hard that onset hit, mapped
-    # so even light strikes still flash (0.55) and the biggest reach 1.0.
+    strike_frames = np.array(sorted(strength), dtype=int)
+    strike_times = [float(f / fps) for f in strike_frames]
+
     beat = np.zeros(frames, dtype=np.float64)
-    if len(peaks):
-        pk = onset[peaks]
-        norm = pk / (pk.max() + 1e-9)
-        beat[peaks] = 0.55 + 0.45 * norm
+    for fr, s in strength.items():
+        beat[fr] = s
     decay_per_frame = FLASH_DECAY_PER_SEC ** (1.0 / fps)
     for i in range(1, frames):
         d = beat[i - 1] * decay_per_frame
@@ -236,7 +279,7 @@ def extract_features(
 
     seed = np.empty(frames, dtype=np.float64)
     current = rng.random() * 100.0
-    peak_set = set(peaks.tolist())
+    peak_set = set(strike_frames.tolist())
     for i in range(frames):
         if i in peak_set:
             current = rng.random() * 100.0

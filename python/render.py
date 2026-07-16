@@ -27,7 +27,7 @@ import moderngl
 import numpy as np
 
 from shaders import FRAGMENT_SRC, VERTEX_SRC
-from audio_features import extract_features, Features, find_ffmpeg
+from audio_features import extract_features, Features, find_ffmpeg, load_strikes_file
 
 
 def synthetic_features(fps: int, seconds: float) -> Features:
@@ -93,11 +93,17 @@ def render(args: argparse.Namespace) -> None:
         feat = synthetic_features(fps, args.seconds)
         audio_for_mux = None
     else:
+        forced = load_strikes_file(args.strikes_file) if args.strikes_file else None
+        if forced:
+            print(f"forcing {len(forced)} strike(s) from {args.strikes_file}"
+                  + (" (strikes-only)" if args.strikes_only else ""))
         print(f"analyzing audio: {args.audio} ...")
         feat = extract_features(
             args.audio, fps=fps,
             intensity_percentile=args.intensity,
             refractory_sec=args.refractory,
+            forced_strikes=forced,
+            strikes_only=args.strikes_only,
         )
         audio_for_mux = args.audio
         print(f"  duration {feat.duration:.1f}s, {feat.frames} frames, "
@@ -200,6 +206,10 @@ def main():
     p.add_argument("--intensity", type=float, default=82.0,
                     help="percentile (0-100): how selective lightning is. Higher = fewer, bigger-only strikes.")
     p.add_argument("--refractory", type=float, default=0.4, help="minimum seconds between strikes")
+    p.add_argument("--strikes-file", help="file of strike times (seconds or m:ss, one per "
+                    "line) that force a full-strength bolt -- e.g. every \"Thunder!\"")
+    p.add_argument("--strikes-only", action="store_true",
+                    help="fire lightning ONLY at --strikes-file times (ignore auto-detected strikes)")
     p.add_argument("--list-strikes", action="store_true", help="print detected strike timestamps")
     p.add_argument("--gl-backend", default="auto", help="moderngl backend override, e.g. egl, glx (default: auto)")
     p.add_argument("--demo", action="store_true", help="render with a synthetic beat, no audio file needed")
@@ -208,6 +218,10 @@ def main():
 
     if not args.demo and not args.audio:
         p.error("an audio file is required unless --demo is given")
+    if args.strikes_only and not args.strikes_file:
+        p.error("--strikes-only needs --strikes-file")
+    if args.strikes_file and args.demo:
+        print("note: --strikes-file is ignored in --demo mode")
     if args.audio and not shutil.which("ffmpeg") and Path(args.audio).suffix.lower() not in (".wav",):
         print("warning: system ffmpeg not found on PATH, falling back to imageio-ffmpeg's bundled binary")
 
