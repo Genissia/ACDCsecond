@@ -1,8 +1,8 @@
 """Audio -> per-video-frame feature extraction for the Thunder Canyon renderer.
 
-Mirrors the live browser app's signal flow (index.html's `analyze()`):
-band energies drive the mountains, a broadband onset drives the lightning.
-Being offline, this can do better than the browser's causal heuristic:
+Signal flow: band energies drive the mountains, a broadband onset drives the
+lightning. Being fully offline (it can see the whole song up front), it uses a
+non-causal approach that a live/streaming detector can't:
 
   - librosa's standard adaptive peak-picker replaces the hand-rolled local
     threshold (proper, well-tested onset/beat literature algorithm).
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - optional fallback
 
 SR = 44100  # canonical analysis sample rate
 
-# Hz ranges for the three bands (mirrors the browser AnalyserNode split)
+# Hz ranges for the three bands (low = bass/kick, mid = riffs, high = cymbals)
 LOW_HZ = (20, 320)
 MID_HZ = (320, 2000)
 HIGH_HZ = (2000, 6500)
@@ -44,7 +44,58 @@ ONSET_WEIGHTS = (0.45, 0.95, 0.35)  # low, mid, high
 ENV_ATTACK = 0.5   # per-frame envelope-follower attack (rising)
 ENV_RELEASE = 0.06  # per-frame envelope-follower release (falling)
 
-FLASH_DECAY_PER_SEC = 0.04  # matches the browser's Math.pow(0.04, dt) flash decay
+FLASH_DECAY_PER_SEC = 0.04  # flash envelope decays to 4% of its value each second
+
+
+def parse_time(token: str) -> float:
+    """Parse one timestamp: seconds ('42', '42.5') or 'm:ss' / 'h:mm:ss'."""
+    token = token.strip()
+    if ":" in token:
+        parts = [float(p) for p in token.split(":")]
+        sec = 0.0
+        for p in parts:
+            sec = sec * 60.0 + p
+        return sec
+    return float(token)
+
+
+FLICKER_PERIOD = 0.18   # seconds between flashes inside a sustained window
+FLICKER_STRENGTH = 0.65  # default flicker strength (below the spike threshold)
+
+
+def load_strikes_file(path: str) -> list[tuple[float, float]]:
+    """Read strike timestamps, returning (time_seconds, strength) pairs.
+
+    Each non-blank, non-#comment line is one of:
+      TIME              -> a full-strength strike (strength 1.0)
+      TIME STRENGTH     -> a strike scaled by STRENGTH (e.g. '1:52 1.8' = mega)
+      TIME-TIME         -> a SUSTAINED flicker across the window (rapid strikes)
+      TIME-TIME STRENGTH-> a sustained flicker at the given strength
+    TIME is seconds ('42', '42.5') or 'm:ss' (e.g. '0:42').
+    """
+    strikes: list[tuple[float, float]] = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        toks = line.split()
+        spec = toks[0]
+        strength = float(toks[1]) if len(toks) > 1 else None
+        if "-" in spec:                                    # sustained window
+            a, b = spec.split("-", 1)
+            t0, t1 = parse_time(a), parse_time(b)
+            if t1 < t0:
+                t0, t1 = t1, t0
+            s = strength if strength is not None else FLICKER_STRENGTH
+            t = t0
+            while t <= t1 + 1e-9:
+                strikes.append((t, s))
+                t += FLICKER_PERIOD
+        else:                                              # single strike
+            s = strength if strength is not None else 1.0
+            strikes.append((parse_time(spec), s))
+    strikes.sort(key=lambda x: x[0])
+    return strikes
 
 
 def find_ffmpeg() -> str:
@@ -104,6 +155,34 @@ def _envelope_follow(x: np.ndarray) -> np.ndarray:
     return out
 
 
+def _moving_avg(x: np.ndarray, win: int) -> np.ndarray:
+    """Slow smoother for the structural energy envelope (verse vs chorus)."""
+    win = max(1, int(win))
+    if win <= 1:
+        return x
+    k = np.ones(win) / win
+    return np.convolve(x, k, mode="same")
+
+
+def _spike_envelope(frames: int, strikes: list[tuple[int, float]], fps: int) -> np.ndarray:
+    """Envelope for the erupting spikes: a fast RISE (bottom-up growth over
+    ~0.15s) at each strike, then a slower recede -- so spikes grow up out of
+    the ground instead of popping in fully-formed and sinking."""
+    spike = np.zeros(frames, dtype=np.float64)
+    attack = max(1, int(round(0.15 * fps)))
+    for fr, s in strikes:
+        for a in range(attack + 1):
+            i = fr + a
+            if 0 <= i < frames:
+                spike[i] = max(spike[i], s * (a / attack))   # linear rise 0 -> s
+    decay = 0.10 ** (1.0 / max(1, int(0.55 * fps)))          # recede over ~0.55s
+    for i in range(1, frames):
+        d = spike[i - 1] * decay
+        if d > spike[i]:
+            spike[i] = d
+    return spike
+
+
 @dataclass
 class Features:
     fps: int
@@ -112,9 +191,14 @@ class Features:
     low: np.ndarray    # 0..1, smoothed
     mid: np.ndarray    # 0..1, smoothed
     high: np.ndarray   # 0..1, smoothed
-    beat: np.ndarray   # 0..1, decaying flash envelope
+    beat: np.ndarray   # 0..1, decaying flash env -- peak height = strike strength
     seed: np.ndarray   # per-frame random seed (changes on each strike)
     move: np.ndarray   # cumulative camera travel distance
+    energy: np.ndarray # 0..1, slow overall loudness (song structure)
+    pulse: np.ndarray  # 0..1, tempo-synced throb (retriggered each beat)
+    spike: np.ndarray  # 0..1, rise-then-recede env for erupting spikes
+    warm: np.ndarray   # 0..1, timbral brightness (spectral centroid)
+    hue: np.ndarray    # 0..1, melodic hue (dominant pitch class / chroma)
     strike_times: list[float]
 
 
@@ -124,6 +208,8 @@ def extract_features(
     intensity_percentile: float = 82.0,
     refractory_sec: float = 0.4,
     rng: np.random.Generator | None = None,
+    forced_strikes: list[tuple[float, float]] | None = None,
+    strikes_only: bool = False,
 ) -> Features:
     """Analyze an audio file and produce per-video-frame driving signals.
 
@@ -131,6 +217,12 @@ def extract_features(
       the top (100 - intensity_percentile)% of the *whole song's* energy
       trigger a strike. Raise it for fewer, bigger moments; lower it for
       more frequent strikes.
+    forced_strikes: explicit (time_seconds, strength) strikes (e.g. every
+      "Thunder!"). Each fires a bolt scaled by strength at that time, on top of
+      the detected strikes -- unless strikes_only is set. strength > 1 gives an
+      extra-strong (mega) bolt.
+    strikes_only: ignore audio-detected strikes and fire ONLY at
+      forced_strikes (lightning strictly on the named moments).
     refractory_sec: minimum gap between strikes.
     """
     rng = rng or np.random.default_rng()
@@ -183,28 +275,100 @@ def extract_features(
         gate = np.percentile(onset, intensity_percentile)
         peaks = peaks[onset[peaks] >= gate]
 
-    strike_times = [float(p / fps) for p in peaks]
+    # per-strike STRENGTH map (frame -> 0..1). Detected peaks are scaled by how
+    # hard the onset hit (light strikes still flash at 0.55, biggest reach 1.0);
+    # forced strikes (e.g. every "Thunder!") always fire at full strength.
+    strength: dict[int, float] = {}
+    if not strikes_only and len(peaks):
+        pmax = onset[peaks].max() + 1e-9
+        for p in peaks:
+            strength[int(p)] = 0.55 + 0.45 * float(onset[p] / pmax)
+    if forced_strikes:
+        for tsec, s in forced_strikes:
+            fr = int(round(tsec * fps))
+            if 0 <= fr < frames:
+                strength[fr] = max(strength.get(fr, 0.0), s)
+
+    strike_frames = np.array(sorted(strength), dtype=int)
+    strike_times = [float(f / fps) for f in strike_frames]
 
     beat = np.zeros(frames, dtype=np.float64)
-    beat[peaks] = 1.0
+    for fr, s in strength.items():
+        beat[fr] = s
     decay_per_frame = FLASH_DECAY_PER_SEC ** (1.0 / fps)
     for i in range(1, frames):
         d = beat[i - 1] * decay_per_frame
         if d > beat[i]:
             beat[i] = d
 
+    # slow loudness envelope (RMS) -> canyon width & fog: quiet = wide+foggy,
+    # loud = narrow+clear. Smoothed over ~1s so it tracks song sections.
+    rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop, center=True)[0]
+    rms = rms[:frames]
+    if len(rms) < frames:
+        rms = np.pad(rms, (0, frames - len(rms)))
+    energy = np.clip(_moving_avg(_pct_norm(rms, pct=95, target=1.0), win=fps), 0.0, 1.0)
+
+    # tempo-synced PULSE: a gentle throb retriggered on every tracked beat, so
+    # the scene breathes on the BPM even between lightning strikes.
+    pulse = np.zeros(frames, dtype=np.float64)
+    try:
+        _, beat_frames = librosa.beat.beat_track(
+            y=y, sr=sr, hop_length=hop, units="frames"
+        )
+        beat_frames = beat_frames[beat_frames < frames]
+        pulse[beat_frames] = 1.0
+    except Exception:
+        beat_frames = np.array([], dtype=int)
+    pulse_decay = 0.12 ** (1.0 / max(1, int(0.30 * fps)))  # ~decays over a beat
+    for i in range(1, frames):
+        d = pulse[i - 1] * pulse_decay
+        if d > pulse[i]:
+            pulse[i] = d
+
+    # spikes erupt only on the strong strikes (keeps them a special punctuation)
+    spike_strikes = [(int(fr), strength[fr]) for fr in strike_frames
+                     if strength[fr] >= 0.7]
+    spike = _spike_envelope(frames, spike_strikes, fps)
+
+    # timbral brightness (spectral centroid) -> colour temperature / warmth
+    cent = librosa.feature.spectral_centroid(
+        y=y, sr=sr, n_fft=n_fft, hop_length=hop, center=True)[0]
+    cent = cent[:frames]
+    if len(cent) < frames:
+        cent = np.pad(cent, (0, frames - len(cent)))
+    warm = np.clip((np.log(cent + 1.0) - np.log(250.0))
+                   / (np.log(4500.0) - np.log(250.0)), 0.0, 1.0)
+    warm = _moving_avg(warm, max(1, int(0.4 * fps)))
+
+    # melodic hue: circular mean of the 12 chroma pitch classes -> 0..1 hue,
+    # smoothed so the colour drifts with the harmony instead of flickering.
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop)
+    chroma = chroma[:, :frames]
+    if chroma.shape[1] < frames:
+        chroma = np.pad(chroma, ((0, 0), (0, frames - chroma.shape[1])))
+    ang = 2 * np.pi * np.arange(12) / 12.0
+    vx = _moving_avg((chroma * np.cos(ang)[:, None]).sum(axis=0), max(1, int(0.5 * fps)))
+    vy = _moving_avg((chroma * np.sin(ang)[:, None]).sum(axis=0), max(1, int(0.5 * fps)))
+    hue = (np.arctan2(vy, vx) / (2 * np.pi)) % 1.0
+
     seed = np.empty(frames, dtype=np.float64)
     current = rng.random() * 100.0
-    peak_set = set(peaks.tolist())
+    peak_set = set(strike_frames.tolist())
     for i in range(frames):
         if i in peak_set:
             current = rng.random() * 100.0
         seed[i] = current
 
-    move = np.cumsum(np.full(frames, 1.0 / fps) * (3.0 + low * 3.5))
+    # camera speed rides the rhythm: cruise on bass, SURGE on each beat
+    # (tempo pulse), LUNGE on the big hits (strike env), faster in loud sections.
+    speed = 2.6 + low * 3.0 + pulse * 2.4 + beat * 3.5
+    speed *= 0.85 + 0.4 * energy
+    move = np.cumsum(speed / fps)
 
     return Features(
         fps=fps, duration=duration, frames=frames,
         low=low, mid=mid, high=high, beat=beat, seed=seed, move=move,
+        energy=energy, pulse=pulse, spike=spike, warm=warm, hue=hue,
         strike_times=strike_times,
     )

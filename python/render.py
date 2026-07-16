@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Thunder Canyon -- standalone Python/OpenGL renderer.
 
-Same raymarched, cel-shaded canyon + storm shader as index.html, driven by
-real audio analysis (see audio_features.py) instead of a browser. Renders
-frame-by-frame through moderngl (real GPU if available) and muxes the
-result with the source audio via ffmpeg in one pass.
+A raymarched, cel-shaded canyon + storm shader driven by real audio analysis
+(see audio_features.py). Renders frame-by-frame through moderngl (real GPU if
+available) and muxes the result with the source audio via ffmpeg in one pass.
 
 Usage:
     python3 render.py song.mp3 -o out.mp4
@@ -20,6 +19,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -27,11 +27,12 @@ import moderngl
 import numpy as np
 
 from shaders import FRAGMENT_SRC, VERTEX_SRC
-from audio_features import extract_features, Features, find_ffmpeg
+from audio_features import (extract_features, Features, find_ffmpeg,
+                             load_strikes_file, _spike_envelope)
 
 
 def synthetic_features(fps: int, seconds: float) -> Features:
-    """Demo driving signal (no audio) -- mirrors the browser app's demo mode."""
+    """Demo driving signal (no audio) -- a synthetic beat so the scene is alive."""
     frames = int(seconds * fps)
     t = np.arange(frames) / fps
     bpm = 118.0
@@ -45,11 +46,13 @@ def synthetic_features(fps: int, seconds: float) -> Features:
     rng = np.random.default_rng(0)
     beat = np.zeros(frames)
     seed = np.zeros(frames)
+    strike_idx = []
     last_beat = -999.0
     cur_seed = rng.random() * 100
     for i in range(frames):
         if t[i] - last_beat > 0.6 and phase[i] < 1.0 / fps * 2:
             beat[i] = 1.0
+            strike_idx.append(i)
             cur_seed = rng.random() * 100
             last_beat = t[i]
         seed[i] = cur_seed
@@ -58,9 +61,33 @@ def synthetic_features(fps: int, seconds: float) -> Features:
         d = beat[i - 1] * decay
         if d > beat[i]:
             beat[i] = d
-    move = np.cumsum(np.full(frames, 1.0 / fps) * (3.0 + low * 3.5))
+
+    # slow structural energy: a synthetic build/drop wave (0..1)
+    energy = np.clip(0.45 + 0.4 * np.sin(t * 0.22), 0.0, 1.0)
+    # tempo-synced throb on the demo's beat grid
+    pulse = np.zeros(frames)
+    pulse_decay = 0.12 ** (1.0 / max(1, int(0.30 * fps)))
+    beat_hit = phase < 1.0 / fps * 2
+    pulse[beat_hit] = 1.0
+    for i in range(1, frames):
+        d = pulse[i - 1] * pulse_decay
+        if d > pulse[i]:
+            pulse[i] = d
+
+    spike = _spike_envelope(frames, [(i, 1.0) for i in strike_idx], fps)
+
+    # synthetic melodic colour: hue drifts slowly, warmth breathes
+    warm = np.clip(0.4 + 0.3 * np.sin(t * 0.3), 0.0, 1.0)
+    hue = (0.58 + 0.12 * np.sin(t * 0.08)) % 1.0
+
+    # camera rides the rhythm (see extract_features): cruise + beat surge + hit lunge
+    speed = 2.6 + low * 3.0 + pulse * 2.4 + beat * 3.5
+    speed *= 0.85 + 0.4 * energy
+    move = np.cumsum(speed / fps)
     return Features(fps=fps, duration=seconds, frames=frames, low=low, mid=mid,
-                     high=high, beat=beat, seed=seed, move=move, strike_times=[])
+                     high=high, beat=beat, seed=seed, move=move,
+                     energy=energy, pulse=pulse, spike=spike, warm=warm, hue=hue,
+                     strike_times=[])
 
 
 def make_context(backend: str | None):
@@ -79,11 +106,17 @@ def render(args: argparse.Namespace) -> None:
         feat = synthetic_features(fps, args.seconds)
         audio_for_mux = None
     else:
+        forced = load_strikes_file(args.strikes_file) if args.strikes_file else None
+        if forced:
+            print(f"forcing {len(forced)} strike(s) from {args.strikes_file}"
+                  + (" (strikes-only)" if args.strikes_only else ""))
         print(f"analyzing audio: {args.audio} ...")
         feat = extract_features(
             args.audio, fps=fps,
             intensity_percentile=args.intensity,
             refractory_sec=args.refractory,
+            forced_strikes=forced,
+            strikes_only=args.strikes_only,
         )
         audio_for_mux = args.audio
         print(f"  duration {feat.duration:.1f}s, {feat.frames} frames, "
@@ -102,7 +135,8 @@ def render(args: argparse.Namespace) -> None:
     # some uniforms (currently uHigh) are declared but unused by the shader math
     # and get optimized out by the GLSL compiler -- guard every lookup.
     U = {name: prog.get(name, None) for name in
-         ("uRes", "uTime", "uMove", "uLow", "uMid", "uHigh", "uBeat", "uSeed")}
+         ("uRes", "uTime", "uMove", "uLow", "uMid", "uHigh", "uBeat", "uSeed",
+          "uEnergy", "uPulse", "uSpike", "uWarm", "uHue")}
     if U["uRes"] is not None:
         U["uRes"].value = (float(w), float(h))
 
@@ -122,6 +156,18 @@ def render(args: argparse.Namespace) -> None:
     print("encoding:", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    # Drain ffmpeg's stderr on a background thread. ffmpeg writes progress to
+    # stderr the whole time; if we only read it at the end, its pipe buffer
+    # fills on a long render, ffmpeg blocks writing to it, stops reading our
+    # video frames, and the whole pipeline deadlocks. Reading it continuously
+    # keeps frames flowing while still capturing the log for error reporting.
+    err_chunks: list[bytes] = []
+    err_thread = threading.Thread(
+        target=lambda: err_chunks.extend(iter(lambda: proc.stderr.read(4096), b"")),
+        daemon=True,
+    )
+    err_thread.start()
+
     t0 = time.time()
     try:
         frame_vals = {
@@ -132,6 +178,11 @@ def render(args: argparse.Namespace) -> None:
             "uHigh": lambda i: feat.high[i],
             "uBeat": lambda i: feat.beat[i],
             "uSeed": lambda i: feat.seed[i],
+            "uEnergy": lambda i: feat.energy[i],
+            "uPulse": lambda i: feat.pulse[i],
+            "uSpike": lambda i: feat.spike[i],
+            "uWarm": lambda i: feat.warm[i],
+            "uHue": lambda i: feat.hue[i],
         }
         for i in range(feat.frames):
             fbo.clear()
@@ -150,10 +201,10 @@ def render(args: argparse.Namespace) -> None:
                 print(f"  frame {i}/{feat.frames}  {el:.0f}s  {r:.1f} fps", flush=True)
     finally:
         proc.stdin.close()
-        err = proc.stderr.read()
         ret = proc.wait()
+        err_thread.join()
         if ret != 0:
-            sys.stderr.write(err.decode(errors="replace"))
+            sys.stderr.write(b"".join(err_chunks).decode(errors="replace"))
             raise RuntimeError(f"ffmpeg exited {ret}")
 
     print(f"done: {out_path}  ({time.time()-t0:.0f}s)")
@@ -171,6 +222,10 @@ def main():
     p.add_argument("--intensity", type=float, default=82.0,
                     help="percentile (0-100): how selective lightning is. Higher = fewer, bigger-only strikes.")
     p.add_argument("--refractory", type=float, default=0.4, help="minimum seconds between strikes")
+    p.add_argument("--strikes-file", help="file of strike times (seconds or m:ss, one per "
+                    "line) that force a full-strength bolt -- e.g. every \"Thunder!\"")
+    p.add_argument("--strikes-only", action="store_true",
+                    help="fire lightning ONLY at --strikes-file times (ignore auto-detected strikes)")
     p.add_argument("--list-strikes", action="store_true", help="print detected strike timestamps")
     p.add_argument("--gl-backend", default="auto", help="moderngl backend override, e.g. egl, glx (default: auto)")
     p.add_argument("--demo", action="store_true", help="render with a synthetic beat, no audio file needed")
@@ -179,6 +234,10 @@ def main():
 
     if not args.demo and not args.audio:
         p.error("an audio file is required unless --demo is given")
+    if args.strikes_only and not args.strikes_file:
+        p.error("--strikes-only needs --strikes-file")
+    if args.strikes_file and args.demo:
+        print("note: --strikes-file is ignored in --demo mode")
     if args.audio and not shutil.which("ffmpeg") and Path(args.audio).suffix.lower() not in (".wav",):
         print("warning: system ffmpeg not found on PATH, falling back to imageio-ffmpeg's bundled binary")
 

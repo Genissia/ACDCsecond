@@ -20,5 +20,7 @@ renders/
 node_modules/
 __pycache__/
 *.pyc
+.venv/
+venv/
 python/venv/
 python/.venv/
