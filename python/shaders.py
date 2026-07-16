@@ -22,8 +22,10 @@ uniform float uMove;   // camera distance travelled down the canyon
 uniform float uLow;    // bass / beat energy   0..~1.5
 uniform float uMid;    // mids / melody        0..~1.5
 uniform float uHigh;   // highs / shimmer      0..~1.5
-uniform float uBeat;   // lightning flash env  0..1 (decays)
+uniform float uBeat;   // lightning flash env  0..1 (decays), height = strike strength
 uniform float uSeed;   // random per-strike
+uniform float uEnergy; // slow overall loudness 0..1 (song structure)
+uniform float uPulse;  // tempo-synced throb   0..1 (retriggers each beat)
 
 // ---------- hash / value noise / fbm ----------
 float hash(vec2 p){
@@ -69,7 +71,9 @@ float pathSlope(float z){
 float terrain(vec2 xz){
   float x = xz.x, z = xz.y;
   float dx = abs(x - pathX(z));
-  float halfW = 1.5;                 // narrow gap the camera threads
+  // AUDIO: canyon breathes -- wide & open when calm, clenched narrow when the
+  // song is loud, with an extra squeeze on every beat (tempo pulse).
+  float halfW = mix(1.9, 1.05, uEnergy) - 0.12 * uPulse;
   float t = max(0.0, dx - halfW);
   float wall = t*t*0.6 + t*0.9;      // canyon walls
 
@@ -112,9 +116,11 @@ float boltPath(vec2 uv, float seed, float xbase){
 float lightning(vec2 uv, float seed){
   float x0 = (hash(vec2(seed, 1.7))*2.0 - 1.0) * 0.55;
   float b  = boltPath(uv, seed, x0);
-  // a couple of branches
-  b += boltPath(uv, seed+3.1, x0 + 0.18) * 0.5;
-  b += boltPath(uv, seed+7.7, x0 - 0.22) * 0.4;
+  // AUDIO: branchiness scales with strike strength -- light hits = a single
+  // bolt, the heaviest hits fork into extra branches.
+  float br = smoothstep(0.45, 0.95, uBeat);
+  b += boltPath(uv, seed+3.1, x0 + 0.18) * 0.5 * br;
+  b += boltPath(uv, seed+7.7, x0 - 0.22) * 0.4 * br;
   return b;
 }
 
@@ -124,9 +130,10 @@ vec3 skyColor(vec3 rd, float flash, float seed, vec2 uv){
   vec3 hor = vec3(0.22, 0.26, 0.35);   // storm horizon light
   vec3 top = vec3(0.02, 0.028, 0.06);
   vec3 col = mix(hor, top, pow(h, 0.55));
-  // turbulent storm clouds
-  float cl  = fbm(vec2(uv.x*1.8 + seed*0.05, uv.y*3.0 - uTime*0.015));
-  float cl2 = fbm(vec2(uv.x*3.6 - 1.7,       uv.y*5.2 - uTime*0.03));
+  // turbulent storm clouds -- churn faster with the highs (cymbals/shimmer)
+  float clv = 1.0 + uHigh*2.2;
+  float cl  = fbm(vec2(uv.x*1.8 + seed*0.05, uv.y*3.0 - uTime*0.015*clv));
+  float cl2 = fbm(vec2(uv.x*3.6 - 1.7,       uv.y*5.2 - uTime*0.03*clv));
   float clouds = smoothstep(0.42, 0.9, cl*0.6 + cl2*0.4);
   col = mix(col, vec3(0.035, 0.045, 0.08), clouds*0.75);
   // flash floods the sky, strongest low and near the bolt
@@ -180,11 +187,17 @@ void main(){
     float rim = pow(1.0 - clamp(n.y, 0.0, 1.0), 3.0);
     lit += rim * vec3(0.08,0.13,0.22) * 0.8;
 
+    // AUDIO: highs -> icy sparkle glinting along the crest edges (cymbals)
+    float spark = pow(max(noise(p.xz*9.0 + uTime*2.0), 0.0), 8.0);
+    lit += uHigh * spark * rim * vec3(0.55,0.70,0.95) * 3.0;
+
     // lightning floods the canyon with cold light
     lit += flash * (0.30 + 0.7*diff) * vec3(0.5,0.62,0.9);
 
     // ---- aerial fog into the storm ----
-    float fog = clamp(1.0 - exp(-t*0.03), 0.0, 1.0);
+    // AUDIO: thick & claustrophobic when quiet, clears to open up on the drops
+    float fogK = mix(0.055, 0.020, uEnergy);
+    float fog = clamp(1.0 - exp(-t*fogK), 0.0, 1.0);
     vec3 sky = skyColor(rd, flash, uSeed, uv);
     col = mix(lit, sky, fog);
   } else {
@@ -195,7 +208,8 @@ void main(){
   col = clamp(col, 0.0, 1.0);
   col = mix(col, col*col*(3.0 - 2.0*col), 0.2);         // gentle contrast
   float vig = smoothstep(1.5, 0.35, length(uv));
-  col *= 0.68 + 0.32*vig;
+  // brighter vignette (base lifted 0.68 -> 0.82) + a subtle beat-synced throb
+  col *= (0.82 + 0.18*vig) * (1.0 + 0.05*uPulse);
   col *= 1.0 - 0.025*sin(gl_FragCoord.y*1.7);           // faint scanline
   col += (hash(gl_FragCoord.xy + uTime) - 0.5) * 0.01;  // subtle dither
   col += flash * 0.04;

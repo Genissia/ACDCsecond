@@ -104,6 +104,15 @@ def _envelope_follow(x: np.ndarray) -> np.ndarray:
     return out
 
 
+def _moving_avg(x: np.ndarray, win: int) -> np.ndarray:
+    """Slow smoother for the structural energy envelope (verse vs chorus)."""
+    win = max(1, int(win))
+    if win <= 1:
+        return x
+    k = np.ones(win) / win
+    return np.convolve(x, k, mode="same")
+
+
 @dataclass
 class Features:
     fps: int
@@ -112,9 +121,11 @@ class Features:
     low: np.ndarray    # 0..1, smoothed
     mid: np.ndarray    # 0..1, smoothed
     high: np.ndarray   # 0..1, smoothed
-    beat: np.ndarray   # 0..1, decaying flash envelope
+    beat: np.ndarray   # 0..1, decaying flash env -- peak height = strike strength
     seed: np.ndarray   # per-frame random seed (changes on each strike)
     move: np.ndarray   # cumulative camera travel distance
+    energy: np.ndarray # 0..1, slow overall loudness (song structure)
+    pulse: np.ndarray  # 0..1, tempo-synced throb (retriggered each beat)
     strike_times: list[float]
 
 
@@ -185,13 +196,43 @@ def extract_features(
 
     strike_times = [float(p / fps) for p in peaks]
 
+    # per-strike STRENGTH: scale each flash by how hard that onset hit, mapped
+    # so even light strikes still flash (0.55) and the biggest reach 1.0.
     beat = np.zeros(frames, dtype=np.float64)
-    beat[peaks] = 1.0
+    if len(peaks):
+        pk = onset[peaks]
+        norm = pk / (pk.max() + 1e-9)
+        beat[peaks] = 0.55 + 0.45 * norm
     decay_per_frame = FLASH_DECAY_PER_SEC ** (1.0 / fps)
     for i in range(1, frames):
         d = beat[i - 1] * decay_per_frame
         if d > beat[i]:
             beat[i] = d
+
+    # slow loudness envelope (RMS) -> canyon width & fog: quiet = wide+foggy,
+    # loud = narrow+clear. Smoothed over ~1s so it tracks song sections.
+    rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop, center=True)[0]
+    rms = rms[:frames]
+    if len(rms) < frames:
+        rms = np.pad(rms, (0, frames - len(rms)))
+    energy = np.clip(_moving_avg(_pct_norm(rms, pct=95, target=1.0), win=fps), 0.0, 1.0)
+
+    # tempo-synced PULSE: a gentle throb retriggered on every tracked beat, so
+    # the scene breathes on the BPM even between lightning strikes.
+    pulse = np.zeros(frames, dtype=np.float64)
+    try:
+        _, beat_frames = librosa.beat.beat_track(
+            y=y, sr=sr, hop_length=hop, units="frames"
+        )
+        beat_frames = beat_frames[beat_frames < frames]
+        pulse[beat_frames] = 1.0
+    except Exception:
+        beat_frames = np.array([], dtype=int)
+    pulse_decay = 0.12 ** (1.0 / max(1, int(0.30 * fps)))  # ~decays over a beat
+    for i in range(1, frames):
+        d = pulse[i - 1] * pulse_decay
+        if d > pulse[i]:
+            pulse[i] = d
 
     seed = np.empty(frames, dtype=np.float64)
     current = rng.random() * 100.0
@@ -206,5 +247,5 @@ def extract_features(
     return Features(
         fps=fps, duration=duration, frames=frames,
         low=low, mid=mid, high=high, beat=beat, seed=seed, move=move,
-        strike_times=strike_times,
+        energy=energy, pulse=pulse, strike_times=strike_times,
     )

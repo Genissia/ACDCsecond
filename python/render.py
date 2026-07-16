@@ -58,9 +58,23 @@ def synthetic_features(fps: int, seconds: float) -> Features:
         d = beat[i - 1] * decay
         if d > beat[i]:
             beat[i] = d
+
+    # slow structural energy: a synthetic build/drop wave (0..1)
+    energy = np.clip(0.45 + 0.4 * np.sin(t * 0.22), 0.0, 1.0)
+    # tempo-synced throb on the demo's beat grid
+    pulse = np.zeros(frames)
+    pulse_decay = 0.12 ** (1.0 / max(1, int(0.30 * fps)))
+    beat_hit = phase < 1.0 / fps * 2
+    pulse[beat_hit] = 1.0
+    for i in range(1, frames):
+        d = pulse[i - 1] * pulse_decay
+        if d > pulse[i]:
+            pulse[i] = d
+
     move = np.cumsum(np.full(frames, 1.0 / fps) * (3.0 + low * 3.5))
     return Features(fps=fps, duration=seconds, frames=frames, low=low, mid=mid,
-                     high=high, beat=beat, seed=seed, move=move, strike_times=[])
+                     high=high, beat=beat, seed=seed, move=move,
+                     energy=energy, pulse=pulse, strike_times=[])
 
 
 def make_context(backend: str | None):
@@ -102,7 +116,8 @@ def render(args: argparse.Namespace) -> None:
     # some uniforms (currently uHigh) are declared but unused by the shader math
     # and get optimized out by the GLSL compiler -- guard every lookup.
     U = {name: prog.get(name, None) for name in
-         ("uRes", "uTime", "uMove", "uLow", "uMid", "uHigh", "uBeat", "uSeed")}
+         ("uRes", "uTime", "uMove", "uLow", "uMid", "uHigh", "uBeat", "uSeed",
+          "uEnergy", "uPulse")}
     if U["uRes"] is not None:
         U["uRes"].value = (float(w), float(h))
 
@@ -144,6 +159,8 @@ def render(args: argparse.Namespace) -> None:
             "uHigh": lambda i: feat.high[i],
             "uBeat": lambda i: feat.beat[i],
             "uSeed": lambda i: feat.seed[i],
+            "uEnergy": lambda i: feat.energy[i],
+            "uPulse": lambda i: feat.pulse[i],
         }
         for i in range(feat.frames):
             fbo.clear()
