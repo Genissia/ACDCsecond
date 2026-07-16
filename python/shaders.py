@@ -164,6 +164,11 @@ float lightning(vec2 uv, float seed){
   float br = smoothstep(0.45, 0.95, uBeat);
   b += boltPath(uv, seed+3.1, x0 + 0.18) * 0.5 * br;
   b += boltPath(uv, seed+7.7, x0 - 0.22) * 0.4 * br;
+  // extra-strong ("mega") strikes (uBeat > 1) fork much more -- a wall of bolts
+  float br2 = smoothstep(1.15, 1.8, uBeat);
+  b += boltPath(uv, seed+11.3, x0 + 0.34) * 0.45 * br2;
+  b += boltPath(uv, seed+17.1, x0 - 0.40) * 0.42 * br2;
+  b += boltPath(uv, seed+23.9, x0 + 0.08) * 0.38 * br2;
   return b;
 }
 
@@ -198,8 +203,10 @@ vec3 skyColor(vec3 rd, float flash, float seed, vec2 uv){
     col += ribbon * auroraCol * auroraAmt * 0.9;
   }
 
-  // flash floods the sky, strongest low and near the bolt
-  col += flash * vec3(0.42, 0.52, 0.78) * (0.35 + 0.65*(1.0 - h));
+  // flash floods the sky (compressed above flash=1 so mega strikes don't blow
+  // to pure white); the bolt core keeps the full flash for an intense glow.
+  float floodF = flash <= 1.0 ? flash : 1.0 + (flash - 1.0)*0.35;
+  col += floodF * vec3(0.42, 0.52, 0.78) * (0.35 + 0.65*(1.0 - h));
   float bolt = lightning(uv, seed);
   col += bolt * flash * vec3(0.9, 0.95, 1.0) * 4.0;
   return col;
@@ -260,8 +267,11 @@ void main(){
     float spark = pow(max(noise(p.xz*9.0 + uTime*2.0), 0.0), 8.0);
     lit += uHigh * spark * rim * vec3(0.55,0.70,0.95) * 3.0;
 
-    // lightning floods the canyon with cold light
-    lit += flash * (0.30 + 0.7*diff) * vec3(0.5,0.62,0.9);
+    // lightning floods the canyon with cold light. Compress the FLOOD above
+    // flash=1 so mega strikes keep structure instead of whiting out (normal
+    // strikes, flash<=1, are unchanged); the bolt core itself stays full-bright.
+    float floodF = flash <= 1.0 ? flash : 1.0 + (flash - 1.0)*0.35;
+    lit += floodF * (0.30 + 0.7*diff) * vec3(0.5,0.62,0.9);
 
     // ---- aerial fog into the storm ----
     // AUDIO: thick & claustrophobic when quiet, clears to open up on the drops

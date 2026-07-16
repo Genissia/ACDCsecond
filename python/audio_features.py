@@ -59,17 +59,43 @@ def parse_time(token: str) -> float:
     return float(token)
 
 
-def load_strikes_file(path: str) -> list[float]:
-    """Read strike timestamps, one per line. Blank lines and #comments ignored.
+FLICKER_PERIOD = 0.18   # seconds between flashes inside a sustained window
+FLICKER_STRENGTH = 0.65  # default flicker strength (below the spike threshold)
 
-    Each line is a time in seconds ('42', '42.5') or 'm:ss' (e.g. '0:42').
+
+def load_strikes_file(path: str) -> list[tuple[float, float]]:
+    """Read strike timestamps, returning (time_seconds, strength) pairs.
+
+    Each non-blank, non-#comment line is one of:
+      TIME              -> a full-strength strike (strength 1.0)
+      TIME STRENGTH     -> a strike scaled by STRENGTH (e.g. '1:52 1.8' = mega)
+      TIME-TIME         -> a SUSTAINED flicker across the window (rapid strikes)
+      TIME-TIME STRENGTH-> a sustained flicker at the given strength
+    TIME is seconds ('42', '42.5') or 'm:ss' (e.g. '0:42').
     """
-    times: list[float] = []
+    strikes: list[tuple[float, float]] = []
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
-        if line:
-            times.append(parse_time(line))
-    return sorted(times)
+        if not line:
+            continue
+        toks = line.split()
+        spec = toks[0]
+        strength = float(toks[1]) if len(toks) > 1 else None
+        if "-" in spec:                                    # sustained window
+            a, b = spec.split("-", 1)
+            t0, t1 = parse_time(a), parse_time(b)
+            if t1 < t0:
+                t0, t1 = t1, t0
+            s = strength if strength is not None else FLICKER_STRENGTH
+            t = t0
+            while t <= t1 + 1e-9:
+                strikes.append((t, s))
+                t += FLICKER_PERIOD
+        else:                                              # single strike
+            s = strength if strength is not None else 1.0
+            strikes.append((parse_time(spec), s))
+    strikes.sort(key=lambda x: x[0])
+    return strikes
 
 
 def find_ffmpeg() -> str:
@@ -182,7 +208,7 @@ def extract_features(
     intensity_percentile: float = 82.0,
     refractory_sec: float = 0.4,
     rng: np.random.Generator | None = None,
-    forced_strikes: list[float] | None = None,
+    forced_strikes: list[tuple[float, float]] | None = None,
     strikes_only: bool = False,
 ) -> Features:
     """Analyze an audio file and produce per-video-frame driving signals.
@@ -191,9 +217,10 @@ def extract_features(
       the top (100 - intensity_percentile)% of the *whole song's* energy
       trigger a strike. Raise it for fewer, bigger moments; lower it for
       more frequent strikes.
-    forced_strikes: explicit strike times in seconds (e.g. every "Thunder!").
-      Each fires a full-strength bolt at that time, on top of the detected
-      strikes -- unless strikes_only is set.
+    forced_strikes: explicit (time_seconds, strength) strikes (e.g. every
+      "Thunder!"). Each fires a bolt scaled by strength at that time, on top of
+      the detected strikes -- unless strikes_only is set. strength > 1 gives an
+      extra-strong (mega) bolt.
     strikes_only: ignore audio-detected strikes and fire ONLY at
       forced_strikes (lightning strictly on the named moments).
     refractory_sec: minimum gap between strikes.
@@ -257,10 +284,10 @@ def extract_features(
         for p in peaks:
             strength[int(p)] = 0.55 + 0.45 * float(onset[p] / pmax)
     if forced_strikes:
-        for tsec in forced_strikes:
+        for tsec, s in forced_strikes:
             fr = int(round(tsec * fps))
             if 0 <= fr < frames:
-                strength[fr] = 1.0
+                strength[fr] = max(strength.get(fr, 0.0), s)
 
     strike_frames = np.array(sorted(strength), dtype=int)
     strike_times = [float(f / fps) for f in strike_frames]

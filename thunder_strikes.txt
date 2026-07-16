@@ -1,14 +1,14 @@
 # "Thunder" word timestamps for AC/DC - Thunderstruck.
-# One time per line: seconds (e.g. 42 or 42.5) or m:ss (e.g. 0:42).
+# Line formats (seconds like 42 / 42.5, or m:ss like 0:42):
+#   TIME              -> a full-strength strike
+#   TIME STRENGTH     -> scaled strike (e.g. 1:52 1.8 = extra-strong "mega" bolt)
+#   TIME-TIME         -> a SUSTAINED flicker across the window (rapid strikes)
 # Blank lines and lines starting with # are ignored.
 # Manually recounted -- nudge any line by a few tenths to fit your file.
 #
-# Usage (fires a bolt on each of these ON TOP of the audio-reactive strikes):
+# Usage (fires on each of these ON TOP of the audio-reactive strikes):
 #   python python/render.py song.mp3 -o out.mp4 --strikes-file thunder_strikes.txt
 # Add --strikes-only to fire lightning ONLY on these "Thunder" moments.
-#
-# TODO (deferred, per notes): 1:52 should be an EXTRA-strong bolt (and maybe a
-# thunder SFX); 4:40-4:45 the word is sustained -> a sustained flicker there.
 
 # Intro / build
 0:29
@@ -28,8 +28,8 @@
 1:26
 1:33
 
-# Refrain (extra-strong hit — see TODO)
-1:52
+# Refrain (extra-strong "mega" bolt)
+1:52 1.8
 
 # Chorus
 2:44
@@ -52,3 +52,6 @@
 4:30
 4:33
 4:38
+
+# Outro -- the word is held here, so a sustained flicker across the window
+4:40-4:45
