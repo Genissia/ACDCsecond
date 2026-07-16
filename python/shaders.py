@@ -67,6 +67,28 @@ float pathSlope(float z){
   return 1.7*0.10*cos(z*0.10) + 0.7*0.043*cos(z*0.043 + 1.3);
 }
 
+// jagged rock spikes that erupt on heavy strikes. amp 0..1 (strike-driven);
+// a field of angular shards on a jittered grid, only some cells spawn one.
+float spikeField(vec2 xz, float amp){
+  if(amp <= 0.001) return 0.0;
+  vec2 cell = xz * 1.4;                   // spacing between potential spikes
+  vec2 id   = floor(cell);
+  vec2 f    = fract(cell);
+  float rnd  = hash(id);                  // does this cell erupt? / height
+  float rnd2 = hash(id + 7.3);            // radius / jitter
+  float rnd3 = hash(id + 3.1);            // extra height variance
+  float present = step(0.58, rnd);        // ~42% of cells erupt
+  vec2 q = f - (vec2(rnd, rnd2)*0.5 + 0.25);
+  // faceted (diamond/chamfer) cross-section -> angular sides, not round blobs
+  float rad  = 0.12 + 0.07*rnd2;
+  float facet = (abs(q.x) + abs(q.y))*0.62 + max(abs(q.x), abs(q.y))*0.5;
+  float body  = pow(clamp(1.0 - facet/rad, 0.0, 1.0), 1.35);
+  // a sharp needle tip rising above the faceted base
+  float tip   = pow(clamp(1.0 - length(q)/(rad*0.55), 0.0, 1.0), 2.2) * 0.6;
+  float tall  = 1.3 + 2.1*rnd3;
+  return (body + tip) * tall * present * amp;
+}
+
 // terrain / canyon height field.  x,z world coords.
 float terrain(vec2 xz){
   float x = xz.x, z = xz.y;
@@ -89,6 +111,14 @@ float terrain(vec2 xz){
   // smooth low canyon floor near the path (the "road")
   float floorMask = smoothstep(halfW*0.1, halfW*1.25, dx);
   h *= floorMask + 0.012;
+
+  // AUDIO: spikes erupt from the floor & gap on the heaviest strikes, then
+  // recede as the flash decays. Added after the floor flatten so they aren't
+  // cancelled near the path -- and biggest on strong bass.
+  float spikeAmp = smoothstep(0.40, 0.95, uBeat) * (0.6 + 0.4*uLow);
+  float nearPath = 1.0 - smoothstep(halfW*0.15, halfW*1.7, dx);
+  h += spikeField(vec2(x, z), spikeAmp * nearPath) * 1.3;
+
   return h - 0.3;
 }
 
