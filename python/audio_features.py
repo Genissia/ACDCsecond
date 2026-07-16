@@ -138,6 +138,25 @@ def _moving_avg(x: np.ndarray, win: int) -> np.ndarray:
     return np.convolve(x, k, mode="same")
 
 
+def _spike_envelope(frames: int, strikes: list[tuple[int, float]], fps: int) -> np.ndarray:
+    """Envelope for the erupting spikes: a fast RISE (bottom-up growth over
+    ~0.15s) at each strike, then a slower recede -- so spikes grow up out of
+    the ground instead of popping in fully-formed and sinking."""
+    spike = np.zeros(frames, dtype=np.float64)
+    attack = max(1, int(round(0.15 * fps)))
+    for fr, s in strikes:
+        for a in range(attack + 1):
+            i = fr + a
+            if 0 <= i < frames:
+                spike[i] = max(spike[i], s * (a / attack))   # linear rise 0 -> s
+    decay = 0.10 ** (1.0 / max(1, int(0.55 * fps)))          # recede over ~0.55s
+    for i in range(1, frames):
+        d = spike[i - 1] * decay
+        if d > spike[i]:
+            spike[i] = d
+    return spike
+
+
 @dataclass
 class Features:
     fps: int
@@ -151,6 +170,7 @@ class Features:
     move: np.ndarray   # cumulative camera travel distance
     energy: np.ndarray # 0..1, slow overall loudness (song structure)
     pulse: np.ndarray  # 0..1, tempo-synced throb (retriggered each beat)
+    spike: np.ndarray  # 0..1, rise-then-recede env for erupting spikes
     strike_times: list[float]
 
 
@@ -277,6 +297,11 @@ def extract_features(
         if d > pulse[i]:
             pulse[i] = d
 
+    # spikes erupt only on the strong strikes (keeps them a special punctuation)
+    spike_strikes = [(int(fr), strength[fr]) for fr in strike_frames
+                     if strength[fr] >= 0.7]
+    spike = _spike_envelope(frames, spike_strikes, fps)
+
     seed = np.empty(frames, dtype=np.float64)
     current = rng.random() * 100.0
     peak_set = set(strike_frames.tolist())
@@ -290,5 +315,5 @@ def extract_features(
     return Features(
         fps=fps, duration=duration, frames=frames,
         low=low, mid=mid, high=high, beat=beat, seed=seed, move=move,
-        energy=energy, pulse=pulse, strike_times=strike_times,
+        energy=energy, pulse=pulse, spike=spike, strike_times=strike_times,
     )

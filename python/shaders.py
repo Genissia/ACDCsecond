@@ -26,6 +26,7 @@ uniform float uBeat;   // lightning flash env  0..1 (decays), height = strike st
 uniform float uSeed;   // random per-strike
 uniform float uEnergy; // slow overall loudness 0..1 (song structure)
 uniform float uPulse;  // tempo-synced throb   0..1 (retriggers each beat)
+uniform float uSpike;  // spike eruption env   0..1 (rises then recedes)
 
 // ---------- hash / value noise / fbm ----------
 float hash(vec2 p){
@@ -112,12 +113,13 @@ float terrain(vec2 xz){
   float floorMask = smoothstep(halfW*0.1, halfW*1.25, dx);
   h *= floorMask + 0.012;
 
-  // AUDIO: spikes erupt from the floor & gap on the heaviest strikes, then
-  // recede as the flash decays. Added after the floor flatten so they aren't
-  // cancelled near the path -- and biggest on strong bass.
-  float spikeAmp = smoothstep(0.40, 0.95, uBeat) * (0.6 + 0.4*uLow);
-  float nearPath = 1.0 - smoothstep(halfW*0.15, halfW*1.7, dx);
-  h += spikeField(vec2(x, z), spikeAmp * nearPath) * 1.3;
+  // AUDIO: spikes erupt on strong strikes (uSpike RISES then recedes) and
+  // grow bigger with bass (uLow). Added after the floor flatten so they aren't
+  // cancelled near the path. The mask spans the whole gap and climbs both
+  // walls, so shards rise from the floor AND from the two sides.
+  float spikeAmp = uSpike * (0.30 + 0.90*uLow);
+  float nearPath = 1.0 - smoothstep(halfW*1.1, halfW*2.3, dx);
+  h += spikeField(vec2(x, z), spikeAmp * nearPath) * 1.5;
 
   return h - 0.3;
 }
@@ -209,9 +211,9 @@ void main(){
 
     // mid-toned storm-rock, tinted by height
     float hgt = clamp(p.y*0.10 + 0.15, 0.0, 1.0);
-    vec3 rock = mix(vec3(0.07,0.10,0.15), vec3(0.30,0.40,0.55), hgt);
-    vec3 ambient = mix(vec3(0.06,0.08,0.12), vec3(0.20,0.26,0.36), upf); // hemispheric
-    vec3 lit  = rock * (ambient + cel*0.75);
+    vec3 rock = mix(vec3(0.10,0.14,0.20), vec3(0.34,0.45,0.60), hgt);
+    vec3 ambient = mix(vec3(0.11,0.14,0.20), vec3(0.28,0.35,0.48), upf); // hemispheric
+    vec3 lit  = rock * (ambient + cel*0.90);
 
     // sky rim-light picks out the crests
     float rim = pow(1.0 - clamp(n.y, 0.0, 1.0), 3.0);
@@ -238,8 +240,8 @@ void main(){
   col = clamp(col, 0.0, 1.0);
   col = mix(col, col*col*(3.0 - 2.0*col), 0.2);         // gentle contrast
   float vig = smoothstep(1.5, 0.35, length(uv));
-  // brighter vignette (base lifted 0.68 -> 0.82) + a subtle beat-synced throb
-  col *= (0.82 + 0.18*vig) * (1.0 + 0.05*uPulse);
+  // brighter vignette (base lifted to 0.90) + a subtle beat-synced throb
+  col *= (0.90 + 0.10*vig) * (1.0 + 0.05*uPulse);
   col *= 1.0 - 0.025*sin(gl_FragCoord.y*1.7);           // faint scanline
   col += (hash(gl_FragCoord.xy + uTime) - 0.5) * 0.01;  // subtle dither
   col += flash * 0.04;

@@ -27,7 +27,8 @@ import moderngl
 import numpy as np
 
 from shaders import FRAGMENT_SRC, VERTEX_SRC
-from audio_features import extract_features, Features, find_ffmpeg, load_strikes_file
+from audio_features import (extract_features, Features, find_ffmpeg,
+                             load_strikes_file, _spike_envelope)
 
 
 def synthetic_features(fps: int, seconds: float) -> Features:
@@ -45,11 +46,13 @@ def synthetic_features(fps: int, seconds: float) -> Features:
     rng = np.random.default_rng(0)
     beat = np.zeros(frames)
     seed = np.zeros(frames)
+    strike_idx = []
     last_beat = -999.0
     cur_seed = rng.random() * 100
     for i in range(frames):
         if t[i] - last_beat > 0.6 and phase[i] < 1.0 / fps * 2:
             beat[i] = 1.0
+            strike_idx.append(i)
             cur_seed = rng.random() * 100
             last_beat = t[i]
         seed[i] = cur_seed
@@ -71,10 +74,12 @@ def synthetic_features(fps: int, seconds: float) -> Features:
         if d > pulse[i]:
             pulse[i] = d
 
+    spike = _spike_envelope(frames, [(i, 1.0) for i in strike_idx], fps)
+
     move = np.cumsum(np.full(frames, 1.0 / fps) * (3.0 + low * 3.5))
     return Features(fps=fps, duration=seconds, frames=frames, low=low, mid=mid,
                      high=high, beat=beat, seed=seed, move=move,
-                     energy=energy, pulse=pulse, strike_times=[])
+                     energy=energy, pulse=pulse, spike=spike, strike_times=[])
 
 
 def make_context(backend: str | None):
@@ -123,7 +128,7 @@ def render(args: argparse.Namespace) -> None:
     # and get optimized out by the GLSL compiler -- guard every lookup.
     U = {name: prog.get(name, None) for name in
          ("uRes", "uTime", "uMove", "uLow", "uMid", "uHigh", "uBeat", "uSeed",
-          "uEnergy", "uPulse")}
+          "uEnergy", "uPulse", "uSpike")}
     if U["uRes"] is not None:
         U["uRes"].value = (float(w), float(h))
 
@@ -167,6 +172,7 @@ def render(args: argparse.Namespace) -> None:
             "uSeed": lambda i: feat.seed[i],
             "uEnergy": lambda i: feat.energy[i],
             "uPulse": lambda i: feat.pulse[i],
+            "uSpike": lambda i: feat.spike[i],
         }
         for i in range(feat.frames):
             fbo.clear()
