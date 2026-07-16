@@ -171,6 +171,8 @@ class Features:
     energy: np.ndarray # 0..1, slow overall loudness (song structure)
     pulse: np.ndarray  # 0..1, tempo-synced throb (retriggered each beat)
     spike: np.ndarray  # 0..1, rise-then-recede env for erupting spikes
+    warm: np.ndarray   # 0..1, timbral brightness (spectral centroid)
+    hue: np.ndarray    # 0..1, melodic hue (dominant pitch class / chroma)
     strike_times: list[float]
 
 
@@ -302,6 +304,27 @@ def extract_features(
                      if strength[fr] >= 0.7]
     spike = _spike_envelope(frames, spike_strikes, fps)
 
+    # timbral brightness (spectral centroid) -> colour temperature / warmth
+    cent = librosa.feature.spectral_centroid(
+        y=y, sr=sr, n_fft=n_fft, hop_length=hop, center=True)[0]
+    cent = cent[:frames]
+    if len(cent) < frames:
+        cent = np.pad(cent, (0, frames - len(cent)))
+    warm = np.clip((np.log(cent + 1.0) - np.log(250.0))
+                   / (np.log(4500.0) - np.log(250.0)), 0.0, 1.0)
+    warm = _moving_avg(warm, max(1, int(0.4 * fps)))
+
+    # melodic hue: circular mean of the 12 chroma pitch classes -> 0..1 hue,
+    # smoothed so the colour drifts with the harmony instead of flickering.
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop)
+    chroma = chroma[:, :frames]
+    if chroma.shape[1] < frames:
+        chroma = np.pad(chroma, ((0, 0), (0, frames - chroma.shape[1])))
+    ang = 2 * np.pi * np.arange(12) / 12.0
+    vx = _moving_avg((chroma * np.cos(ang)[:, None]).sum(axis=0), max(1, int(0.5 * fps)))
+    vy = _moving_avg((chroma * np.sin(ang)[:, None]).sum(axis=0), max(1, int(0.5 * fps)))
+    hue = (np.arctan2(vy, vx) / (2 * np.pi)) % 1.0
+
     seed = np.empty(frames, dtype=np.float64)
     current = rng.random() * 100.0
     peak_set = set(strike_frames.tolist())
@@ -319,5 +342,6 @@ def extract_features(
     return Features(
         fps=fps, duration=duration, frames=frames,
         low=low, mid=mid, high=high, beat=beat, seed=seed, move=move,
-        energy=energy, pulse=pulse, spike=spike, strike_times=strike_times,
+        energy=energy, pulse=pulse, spike=spike, warm=warm, hue=hue,
+        strike_times=strike_times,
     )

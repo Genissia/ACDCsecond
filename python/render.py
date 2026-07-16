@@ -76,13 +76,18 @@ def synthetic_features(fps: int, seconds: float) -> Features:
 
     spike = _spike_envelope(frames, [(i, 1.0) for i in strike_idx], fps)
 
+    # synthetic melodic colour: hue drifts slowly, warmth breathes
+    warm = np.clip(0.4 + 0.3 * np.sin(t * 0.3), 0.0, 1.0)
+    hue = (0.58 + 0.12 * np.sin(t * 0.08)) % 1.0
+
     # camera rides the rhythm (see extract_features): cruise + beat surge + hit lunge
     speed = 2.6 + low * 3.0 + pulse * 2.4 + beat * 3.5
     speed *= 0.85 + 0.4 * energy
     move = np.cumsum(speed / fps)
     return Features(fps=fps, duration=seconds, frames=frames, low=low, mid=mid,
                      high=high, beat=beat, seed=seed, move=move,
-                     energy=energy, pulse=pulse, spike=spike, strike_times=[])
+                     energy=energy, pulse=pulse, spike=spike, warm=warm, hue=hue,
+                     strike_times=[])
 
 
 def make_context(backend: str | None):
@@ -131,7 +136,7 @@ def render(args: argparse.Namespace) -> None:
     # and get optimized out by the GLSL compiler -- guard every lookup.
     U = {name: prog.get(name, None) for name in
          ("uRes", "uTime", "uMove", "uLow", "uMid", "uHigh", "uBeat", "uSeed",
-          "uEnergy", "uPulse", "uSpike")}
+          "uEnergy", "uPulse", "uSpike", "uWarm", "uHue")}
     if U["uRes"] is not None:
         U["uRes"].value = (float(w), float(h))
 
@@ -176,6 +181,8 @@ def render(args: argparse.Namespace) -> None:
             "uEnergy": lambda i: feat.energy[i],
             "uPulse": lambda i: feat.pulse[i],
             "uSpike": lambda i: feat.spike[i],
+            "uWarm": lambda i: feat.warm[i],
+            "uHue": lambda i: feat.hue[i],
         }
         for i in range(feat.frames):
             fbo.clear()

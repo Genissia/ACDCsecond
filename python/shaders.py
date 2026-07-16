@@ -27,6 +27,16 @@ uniform float uSeed;   // random per-strike
 uniform float uEnergy; // slow overall loudness 0..1 (song structure)
 uniform float uPulse;  // tempo-synced throb   0..1 (retriggers each beat)
 uniform float uSpike;  // spike eruption env   0..1 (rises then recedes)
+uniform float uWarm;   // timbral brightness   0..1 (spectral centroid)
+uniform float uHue;    // melodic hue          0..1 (chroma pitch class)
+
+// melodic colour: a smooth cosine palette biased toward the stormy family so
+// the scene is TINTED by the music, not turned into a rainbow.
+vec3 melodyColor(float t){
+  vec3 c = 0.5 + 0.5*cos(6.28318*(t + vec3(0.0, 0.33, 0.67)));
+  vec3 storm = vec3(0.35, 0.5, 0.9);          // cold storm-blue anchor
+  return mix(storm, c, 0.6);                   // pull the hue back toward blue
+}
 
 // ---------- hash / value noise / fbm ----------
 float hash(vec2 p){
@@ -113,13 +123,14 @@ float terrain(vec2 xz){
   float floorMask = smoothstep(halfW*0.1, halfW*1.25, dx);
   h *= floorMask + 0.012;
 
-  // AUDIO: spikes erupt on strong strikes (uSpike RISES then recedes) and
-  // grow bigger with bass (uLow). Added after the floor flatten so they aren't
-  // cancelled near the path. The mask spans the whole gap and climbs both
-  // walls, so shards rise from the floor AND from the two sides.
+  // AUDIO: spikes erupt on strong strikes (uSpike RISES then recedes) and grow
+  // bigger with bass (uLow). They sprout from the MOUNTAIN WALLS on both sides
+  // -- never from the canyon floor: the mask is zero near the path and fades
+  // in across the wall faces.
   float spikeAmp = uSpike * (0.30 + 0.90*uLow);
-  float nearPath = 1.0 - smoothstep(halfW*1.1, halfW*2.3, dx);
-  h += spikeField(vec2(x, z), spikeAmp * nearPath) * 1.5;
+  float wallMask = smoothstep(halfW*0.80, halfW*1.02, dx)      // off the floor
+                 * (1.0 - smoothstep(halfW*1.7, halfW*2.9, dx)); // concentrate low
+  h += spikeField(vec2(x, z), spikeAmp * wallMask) * 2.3;
 
   return h - 0.3;
 }
@@ -158,9 +169,10 @@ float lightning(vec2 uv, float seed){
 
 // ---------- palette ----------
 vec3 skyColor(vec3 rd, float flash, float seed, vec2 uv){
+  vec3 tint = melodyColor(uHue);                     // AUDIO: melody -> colour
   float h = clamp(rd.y*1.7 + 0.08, 0.0, 1.0);
-  vec3 hor = vec3(0.22, 0.26, 0.35);   // storm horizon light
-  vec3 top = vec3(0.02, 0.028, 0.06);
+  vec3 hor = mix(vec3(0.22, 0.26, 0.35), tint*0.55, 0.35);   // storm horizon, tinted
+  vec3 top = mix(vec3(0.02, 0.028, 0.06), tint*0.12, 0.30);
   vec3 col = mix(hor, top, pow(h, 0.55));
   // turbulent storm clouds -- churn faster with the highs (cymbals/shimmer)
   float clv = 1.0 + uHigh*2.2;
@@ -168,6 +180,24 @@ vec3 skyColor(vec3 rd, float flash, float seed, vec2 uv){
   float cl2 = fbm(vec2(uv.x*3.6 - 1.7,       uv.y*5.2 - uTime*0.03*clv));
   float clouds = smoothstep(0.42, 0.9, cl*0.6 + cl2*0.4);
   col = mix(col, vec3(0.035, 0.045, 0.08), clouds*0.75);
+
+  // AUDIO: aurora ribbons ripple across the upper sky during loud/sustained
+  // sections (uEnergy), shimmering with the highs, coloured by the melody.
+  float auroraAmt = smoothstep(0.35, 0.85, uEnergy);
+  if(auroraAmt > 0.001){
+    float skyMask = smoothstep(0.03, 0.5, uv.y);     // upper sky only
+    float ribbon = 0.0;
+    for(int k=0; k<3; k++){
+      float fk = float(k);
+      float y0 = 0.20 + 0.15*fk + 0.04*sin(uTime*0.3 + fk*1.7);
+      float w  = fbm(vec2(uv.x*2.2 + fk*3.1, uTime*0.12 + fk));
+      ribbon += exp(-pow((uv.y - y0 - 0.13*w)/0.045, 2.0));
+    }
+    ribbon *= skyMask * (0.5 + 0.6*uHigh);
+    vec3 auroraCol = mix(vec3(0.15, 0.9, 0.55), tint, 0.5);  // green + melody hue
+    col += ribbon * auroraCol * auroraAmt * 0.9;
+  }
+
   // flash floods the sky, strongest low and near the bolt
   col += flash * vec3(0.42, 0.52, 0.78) * (0.35 + 0.65*(1.0 - h));
   float bolt = lightning(uv, seed);
@@ -204,20 +234,27 @@ void main(){
   if(hit > 0.0){
     vec3 p = ro + rd*hit;
     vec3 n = terrainNormal(p.xz);
+    vec3 tint = melodyColor(uHue);                     // AUDIO: melody -> colour
     vec3 ld = normalize(vec3(0.35, 0.6, -0.5));
     float diff = clamp(dot(n, ld), 0.0, 1.0);
     float cel  = floor(diff*3.0 + 0.5) / 3.0;          // posterized cel shading
+    // fill light from the opposite side lifts the shadowed wall (less black)
+    float fill = clamp(dot(n, normalize(vec3(-0.45, 0.35, 0.5))), 0.0, 1.0) * 0.45;
     float upf  = 0.5 + 0.5*n.y;                         // sky-facing amount
 
     // mid-toned storm-rock, tinted by height
     float hgt = clamp(p.y*0.10 + 0.15, 0.0, 1.0);
-    vec3 rock = mix(vec3(0.10,0.14,0.20), vec3(0.34,0.45,0.60), hgt);
-    vec3 ambient = mix(vec3(0.11,0.14,0.20), vec3(0.28,0.35,0.48), upf); // hemispheric
-    vec3 lit  = rock * (ambient + cel*0.90);
+    vec3 rock = mix(vec3(0.11,0.15,0.21), vec3(0.36,0.47,0.62), hgt);
+    // hemispheric ambient -- brighter floor (lifts dark side) + a melody tint
+    vec3 ambient = mix(vec3(0.16,0.19,0.26), vec3(0.32,0.39,0.52), upf);
+    ambient = mix(ambient, ambient*tint*1.5, 0.30);
+    // key + fill light, tinted by the melody, brighter with timbral warmth
+    vec3 lightCol = mix(vec3(0.85,0.90,1.05), tint, 0.45) * (0.85 + 0.5*uWarm);
+    vec3 lit  = rock * (ambient + (cel*0.90 + fill) * lightCol);
 
-    // sky rim-light picks out the crests
+    // sky rim-light picks out the crests (melody-tinted)
     float rim = pow(1.0 - clamp(n.y, 0.0, 1.0), 3.0);
-    lit += rim * vec3(0.08,0.13,0.22) * 0.8;
+    lit += rim * mix(vec3(0.08,0.13,0.22), tint*0.35, 0.5) * 0.9;
 
     // AUDIO: highs -> icy sparkle glinting along the crest edges (cymbals)
     float spark = pow(max(noise(p.xz*9.0 + uTime*2.0), 0.0), 8.0);
