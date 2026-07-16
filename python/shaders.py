@@ -115,9 +115,13 @@ float terrain(vec2 xz){
   m += ridged(vec2(x*0.62 + 13.0, z*0.62)) * 1.1;
   m += fbm(vec2(x*1.7, z*1.7)) * 0.25;          // fine roughness
 
-  // AUDIO: low -> mountains grow / breathe;  mid -> crest detail (melody)
-  float grow = 1.0 + uLow*1.15;
-  float h = (wall + m*(0.45 + uMid*0.9)) * grow;
+  // AUDIO: mountains RISE AND FALL with the music. Low base crest height plus a
+  // strong bass/beat pump, so the peaks visibly bob up and down instead of only
+  // stretching a permanently-tall ridge; mid adds melodic crest detail. Walls
+  // breathe gently so the whole mass lifts a little on the beat too.
+  float crestPump = 0.18 + uMid*0.5 + uLow*1.15 + uBeat*0.45;
+  float wallGrow  = 0.78 + uLow*0.45;
+  float h = wall*wallGrow + m*crestPump;
 
   // smooth low canyon floor near the path (the "road")
   float floorMask = smoothstep(halfW*0.1, halfW*1.25, dx);
