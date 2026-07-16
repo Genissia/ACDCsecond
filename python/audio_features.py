@@ -310,7 +310,11 @@ def extract_features(
             current = rng.random() * 100.0
         seed[i] = current
 
-    move = np.cumsum(np.full(frames, 1.0 / fps) * (3.0 + low * 3.5))
+    # camera speed rides the rhythm: cruise on bass, SURGE on each beat
+    # (tempo pulse), LUNGE on the big hits (strike env), faster in loud sections.
+    speed = 2.6 + low * 3.0 + pulse * 2.4 + beat * 3.5
+    speed *= 0.85 + 0.4 * energy
+    move = np.cumsum(speed / fps)
 
     return Features(
         fps=fps, duration=duration, frames=frames,

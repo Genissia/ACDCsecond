@@ -76,7 +76,10 @@ def synthetic_features(fps: int, seconds: float) -> Features:
 
     spike = _spike_envelope(frames, [(i, 1.0) for i in strike_idx], fps)
 
-    move = np.cumsum(np.full(frames, 1.0 / fps) * (3.0 + low * 3.5))
+    # camera rides the rhythm (see extract_features): cruise + beat surge + hit lunge
+    speed = 2.6 + low * 3.0 + pulse * 2.4 + beat * 3.5
+    speed *= 0.85 + 0.4 * energy
+    move = np.cumsum(speed / fps)
     return Features(fps=fps, duration=seconds, frames=frames, low=low, mid=mid,
                      high=high, beat=beat, seed=seed, move=move,
                      energy=energy, pulse=pulse, spike=spike, strike_times=[])
